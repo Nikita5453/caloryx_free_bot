@@ -586,7 +586,19 @@ def build_app(token: str) -> Application:
     return app
 
 
-def analyze_food_with_openai(description: str) -> dict:
+def extract_response_json(data: dict) -> dict:
+    output_text = data.get("output_text")
+    if not output_text:
+        chunks = []
+        for item in data.get("output", []):
+            for content in item.get("content", []):
+                if content.get("type") in {"output_text", "text"}:
+                    chunks.append(content.get("text", ""))
+        output_text = "".join(chunks)
+    return json.loads(output_text)
+
+
+def call_openai_json(system_prompt: str, user_payload: dict, schema_name: str, schema: dict) -> dict:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
@@ -596,49 +608,19 @@ def analyze_food_with_openai(description: str) -> dict:
         "input": [
             {
                 "role": "system",
-                "content": (
-                    "Ты нутрициологический парсер для дневника калорий. "
-                    "По описанию блюда верни только JSON без markdown. "
-                    "Оцени готовое блюдо, способ приготовления и размер порции. "
-                    "Поля: food_name string, portion_label string, grams integer, "
-                    "calories integer, protein integer, fat integer, carbs integer, "
-                    "usefulness number от 0 до 10. Если данных мало, сделай разумную оценку."
-                ),
+                "content": system_prompt,
             },
             {
                 "role": "user",
-                "content": description,
+                "content": json.dumps(user_payload, ensure_ascii=False),
             },
         ],
         "text": {
             "format": {
                 "type": "json_schema",
-                "name": "food_analysis",
+                "name": schema_name,
                 "strict": True,
-                "schema": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "food_name": {"type": "string"},
-                        "portion_label": {"type": "string"},
-                        "grams": {"type": "integer", "minimum": 1, "maximum": 5000},
-                        "calories": {"type": "integer", "minimum": 1, "maximum": 10000},
-                        "protein": {"type": "integer", "minimum": 0, "maximum": 1000},
-                        "fat": {"type": "integer", "minimum": 0, "maximum": 1000},
-                        "carbs": {"type": "integer", "minimum": 0, "maximum": 1000},
-                        "usefulness": {"type": "number", "minimum": 0, "maximum": 10},
-                    },
-                    "required": [
-                        "food_name",
-                        "portion_label",
-                        "grams",
-                        "calories",
-                        "protein",
-                        "fat",
-                        "carbs",
-                        "usefulness",
-                    ],
-                },
+                "schema": schema,
             }
         },
     }
@@ -653,16 +635,88 @@ def analyze_food_with_openai(description: str) -> dict:
     )
     with urllib.request.urlopen(request, timeout=45) as response:
         data = json.loads(response.read().decode("utf-8"))
+    return extract_response_json(data)
 
-    output_text = data.get("output_text")
-    if not output_text:
-        chunks = []
-        for item in data.get("output", []):
-            for content in item.get("content", []):
-                if content.get("type") in {"output_text", "text"}:
-                    chunks.append(content.get("text", ""))
-        output_text = "".join(chunks)
-    return json.loads(output_text)
+
+def analyze_food_with_openai(description: str) -> dict:
+    return call_openai_json(
+        system_prompt=(
+            "Ты нутрициологический парсер для дневника калорий. "
+            "По описанию блюда верни только JSON без markdown. "
+            "Оцени готовое блюдо, способ приготовления и размер порции. "
+            "Если данных мало, сделай разумную оценку."
+        ),
+        user_payload={"description": description},
+        schema_name="food_analysis",
+        schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "food_name": {"type": "string"},
+                "portion_label": {"type": "string"},
+                "grams": {"type": "integer", "minimum": 1, "maximum": 5000},
+                "calories": {"type": "integer", "minimum": 1, "maximum": 10000},
+                "protein": {"type": "integer", "minimum": 0, "maximum": 1000},
+                "fat": {"type": "integer", "minimum": 0, "maximum": 1000},
+                "carbs": {"type": "integer", "minimum": 0, "maximum": 1000},
+                "usefulness": {"type": "number", "minimum": 0, "maximum": 10},
+            },
+            "required": [
+                "food_name",
+                "portion_label",
+                "grams",
+                "calories",
+                "protein",
+                "fat",
+                "carbs",
+                "usefulness",
+            ],
+        },
+    )
+
+
+def create_plan_with_openai(profile: dict) -> dict:
+    return call_openai_json(
+        system_prompt=(
+            "Ты осторожный нутрициологический помощник. На основе анкеты пользователя "
+            "составь реалистичный дневной режим питания для приложения подсчета калорий. "
+            "Не давай медицинских обещаний. Для опасных значений выбирай безопасный умеренный режим. "
+            "Верни только JSON. Калории не ниже 1200 для большинства взрослых, без экстремальных дефицитов."
+        ),
+        user_payload={"profile": profile},
+        schema_name="personal_nutrition_plan",
+        schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "calories": {"type": "integer", "minimum": 1000, "maximum": 5000},
+                "protein": {"type": "integer", "minimum": 20, "maximum": 350},
+                "fat": {"type": "integer", "minimum": 20, "maximum": 250},
+                "carbs": {"type": "integer", "minimum": 20, "maximum": 700},
+                "goal_label": {"type": "string"},
+                "target_date": {"type": "string"},
+                "weekly_rate": {"type": "number", "minimum": 0, "maximum": 1},
+                "summary": {"type": "string"},
+                "daily_advice": {
+                    "type": "array",
+                    "minItems": 3,
+                    "maxItems": 5,
+                    "items": {"type": "string"},
+                },
+            },
+            "required": [
+                "calories",
+                "protein",
+                "fat",
+                "carbs",
+                "goal_label",
+                "target_date",
+                "weekly_rate",
+                "summary",
+                "daily_advice",
+            ],
+        },
+    )
 
 
 class WebAppApiHandler(BaseHTTPRequestHandler):
@@ -677,17 +731,23 @@ class WebAppApiHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self) -> None:
-        if self.path != "/api/analyze-food":
+        if self.path not in {"/api/analyze-food", "/api/create-plan"}:
             self.send_json({"error": "Not found"}, 404)
             return
 
         try:
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            description = str(payload.get("description", "")).strip()
-            if len(description) < 3:
-                raise ValueError("description is too short")
-            result = analyze_food_with_openai(description[:600])
+            if self.path == "/api/analyze-food":
+                description = str(payload.get("description", "")).strip()
+                if len(description) < 3:
+                    raise ValueError("description is too short")
+                result = analyze_food_with_openai(description[:600])
+            else:
+                profile = payload.get("profile")
+                if not isinstance(profile, dict):
+                    raise ValueError("profile is required")
+                result = create_plan_with_openai(profile)
             self.send_json(result)
         except RuntimeError as exc:
             self.send_json({"error": str(exc)}, 500)
