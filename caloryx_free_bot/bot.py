@@ -575,6 +575,7 @@ FOOD_ANALYSIS_SCHEMA = {
         "fat": {"type": "integer", "minimum": 0, "maximum": 1000},
         "carbs": {"type": "integer", "minimum": 0, "maximum": 1000},
         "usefulness": {"type": "number", "minimum": 0, "maximum": 10},
+        "recommendation": {"type": "string"},
     },
     "required": [
         "food_name",
@@ -585,6 +586,7 @@ FOOD_ANALYSIS_SCHEMA = {
         "fat",
         "carbs",
         "usefulness",
+        "recommendation",
     ],
 }
 
@@ -649,6 +651,7 @@ def analyze_food_with_openai(description: str) -> dict:
             "Ты нутрициологический парсер для дневника калорий. "
             "По описанию блюда верни только JSON без markdown. "
             "Оцени готовое блюдо, способ приготовления и размер порции. "
+            "В recommendation дай короткий полезный совет на русском: что улучшить, добавить или оставить как есть. "
             "Если данных мало, сделай разумную оценку."
         ),
         user_payload={"description": description},
@@ -669,6 +672,7 @@ def analyze_food_photo_with_openai(image_data_url: str, note: str = "") -> dict:
             "Ты нутрициологический vision-парсер для дневника калорий. "
             "По фото блюда оцени наиболее вероятное блюдо, примерный вес порции, калории и БЖУ. "
             "Если вес по фото неочевиден, сделай осторожную реалистичную оценку и отрази порцию в portion_label. "
+            "В recommendation дай короткий полезный совет на русском: что улучшить, добавить или оставить как есть. "
             "Верни только JSON без markdown."
         ),
         user_payload=None,
