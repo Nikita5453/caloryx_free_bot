@@ -772,6 +772,42 @@ def analyze_food_photo_with_openai(image_data_url: str, note: str = "") -> dict:
     )
 
 
+def generate_food_image_with_openai(description: str) -> dict:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not configured")
+
+    prompt = (
+        "Use case: photorealistic-natural. Asset type: small thumbnail for a calorie tracker. "
+        f"Primary request: one realistic prepared serving of {description[:300]}. "
+        "Composition: appetizing close-up food photography, the dish centered and fully visible. "
+        "Scene: clean light neutral table surface. "
+        "Constraints: no people, no hands, no packaging, no text, no logos, no watermark."
+    )
+    payload = {
+        "model": os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2"),
+        "prompt": prompt,
+        "size": "1024x1024",
+        "quality": "low",
+        "output_format": "jpeg",
+    }
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/images/generations",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=75) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    image_base64 = data.get("data", [{}])[0].get("b64_json", "")
+    if not image_base64:
+        raise RuntimeError("OpenAI did not return an image")
+    return {"image_data_url": f"data:image/jpeg;base64,{image_base64}"}
+
+
 def diet_macro_grams(calories: int, diet: str) -> tuple[int, int, int]:
     diet_splits = {
         "none": (0.29, 0.28, 0.43),
@@ -940,7 +976,7 @@ class WebAppApiHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self) -> None:
-        if self.path not in {"/api/analyze-food", "/api/analyze-photo", "/api/create-plan", "/api/sync-state"}:
+        if self.path not in {"/api/analyze-food", "/api/analyze-photo", "/api/generate-food-image", "/api/create-plan", "/api/sync-state"}:
             self.send_json({"error": "Not found"}, 404)
             return
 
@@ -958,6 +994,11 @@ class WebAppApiHandler(BaseHTTPRequestHandler):
                 image_data_url = str(payload.get("image_data_url", "")).strip()
                 note = str(payload.get("note", "")).strip()
                 result = analyze_food_photo_with_openai(image_data_url, note)
+            elif self.path == "/api/generate-food-image":
+                description = str(payload.get("description", "")).strip()
+                if len(description) < 2:
+                    raise ValueError("description is too short")
+                result = generate_food_image_with_openai(description)
             elif self.path == "/api/create-plan":
                 profile = payload.get("profile")
                 if not isinstance(profile, dict):
