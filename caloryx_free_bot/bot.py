@@ -18,8 +18,8 @@ from dotenv import load_dotenv
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
+    MenuButtonWebApp,
+    ReplyKeyboardRemove,
     Update,
     WebAppInfo,
 )
@@ -37,6 +37,7 @@ from telegram.ext import (
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "caloryx_free.sqlite3"
 WEBAPP_DIR = BASE_DIR / "webapp"
+WEB_APP_URL: Optional[str] = None
 
 GENDER, AGE, HEIGHT, WEIGHT, ACTIVITY, GOAL, FOOD_TEXT, FOOD_CALORIES = range(8)
 
@@ -83,15 +84,23 @@ FOOD_DB = {
     "суп": 55,
 }
 
-def build_main_keyboard(web_app_url: Optional[str] = None) -> ReplyKeyboardMarkup:
-    if web_app_url and web_app_url.startswith("https://"):
-        rows = [[KeyboardButton("📸 Сканировать", web_app=WebAppInfo(url=web_app_url))]]
-    else:
-        rows = [["📸 Сканировать"]]
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+def build_main_keyboard(web_app_url: Optional[str] = None) -> ReplyKeyboardRemove:
+    return ReplyKeyboardRemove()
 
 
 MAIN_KEYBOARD = build_main_keyboard()
+
+
+async def ensure_web_app_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not WEB_APP_URL or not WEB_APP_URL.startswith("https://") or not update.effective_chat:
+        return
+    await context.bot.set_chat_menu_button(
+        chat_id=update.effective_chat.id,
+        menu_button=MenuButtonWebApp(
+            text="📸 Сканировать",
+            web_app=WebAppInfo(url=WEB_APP_URL),
+        ),
+    )
 
 
 @dataclass
@@ -241,6 +250,7 @@ def profile_text(profile: sqlite3.Row) -> str:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await ensure_web_app_menu(update, context)
     user_id = update.effective_user.id
     profile = get_profile(user_id)
     if profile:
@@ -719,13 +729,14 @@ def start_webapp_api() -> None:
 
 
 def main() -> None:
-    global MAIN_KEYBOARD
+    global MAIN_KEYBOARD, WEB_APP_URL
 
     load_dotenv(BASE_DIR / ".env")
     token = os.getenv("BOT_TOKEN")
     if not token:
         raise RuntimeError("Добавьте BOT_TOKEN в .env")
-    MAIN_KEYBOARD = build_main_keyboard(os.getenv("WEB_APP_URL"))
+    WEB_APP_URL = os.getenv("WEB_APP_URL")
+    MAIN_KEYBOARD = build_main_keyboard(WEB_APP_URL)
 
     logging.basicConfig(
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
