@@ -39,6 +39,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "caloryx_free.sqlite3"
 WEBAPP_DIR = BASE_DIR / "webapp"
 WEB_APP_URL: Optional[str] = None
+OPEN_APP_HINT = "👇🏼Чтобы начать пользоваться, нажмите синюю кнопку «📸 Сканировать»"
 
 GENDER, AGE, HEIGHT, WEIGHT, ACTIVITY, GOAL, FOOD_TEXT, FOOD_CALORIES = range(8)
 
@@ -252,21 +253,7 @@ def profile_text(profile: sqlite3.Row) -> str:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await ensure_web_app_menu(update, context)
-    user_id = update.effective_user.id
-    profile = get_profile(user_id)
-    if profile:
-        text = (
-            "Готово, доступ бесплатный для всех функций.\n"
-            "Чтобы открыть приложение, нажми синюю кнопку «📸 Сканировать».\n\n"
-            + calories_left_text(user_id)
-        )
-    else:
-        text = (
-            "Привет! Я бесплатный бот для дневника калорий.\n\n"
-            "Чтобы начать, нажми синюю кнопку «📸 Сканировать». "
-            "Профиль и дневник теперь открываются внутри Mini App."
-        )
-    await update.message.reply_text(text, reply_markup=MAIN_KEYBOARD)
+    await update.message.reply_text(OPEN_APP_HINT, reply_markup=MAIN_KEYBOARD)
 
 
 async def profile_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -518,30 +505,8 @@ async def profile_show(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def route_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = update.message.text.lower().strip()
-    if text == "добавить еду":
-        await add_command(update, context)
-    elif text == "📸 сканировать":
-        await update.message.reply_text(
-            "Чтобы эта кнопка открывала приложение, добавь публичную https-ссылку в WEB_APP_URL внутри .env.",
-            reply_markup=MAIN_KEYBOARD,
-        )
-    elif text == "сегодня":
-        await today_command(update, context)
-    elif text == "профиль":
-        await profile_show(update, context)
-    elif text == "история":
-        await history_command(update, context)
-    elif get_profile(update.effective_user.id):
-        parsed = parse_food(text)
-        if parsed.calories is None:
-            await update.message.reply_text(
-                "Не узнал продукт. Используй /add, чтобы добавить его с калорийностью вручную."
-            )
-        else:
-            await save_meal(update, parsed)
-    else:
-        await update.message.reply_text("Сначала настрой профиль: /profile", reply_markup=MAIN_KEYBOARD)
+    await ensure_web_app_menu(update, context)
+    await update.effective_message.reply_text(OPEN_APP_HINT, reply_markup=MAIN_KEYBOARD)
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -566,7 +531,6 @@ def build_app(token: str) -> Application:
     food_conv = ConversationHandler(
         entry_points=[
             CommandHandler("add", add_command),
-            MessageHandler(filters.Regex(r"^Добавить еду$"), add_command),
         ],
         states={
             FOOD_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_food_text)],
@@ -583,7 +547,7 @@ def build_app(token: str) -> Application:
     app.add_handler(CommandHandler("history", history_command))
     app.add_handler(CommandHandler("reset", reset_command))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_web_app_data))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, route_text))
+    app.add_handler(MessageHandler(filters.ALL & ~filters.StatusUpdate.WEB_APP_DATA, route_text))
     return app
 
 
