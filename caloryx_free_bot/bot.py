@@ -599,10 +599,50 @@ def extract_response_json(data: dict) -> dict:
     return json.loads(output_text)
 
 
-def call_openai_json(system_prompt: str, user_payload: dict, schema_name: str, schema: dict) -> dict:
+FOOD_ANALYSIS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "food_name": {"type": "string"},
+        "portion_label": {"type": "string"},
+        "grams": {"type": "integer", "minimum": 1, "maximum": 5000},
+        "calories": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "protein": {"type": "integer", "minimum": 0, "maximum": 1000},
+        "fat": {"type": "integer", "minimum": 0, "maximum": 1000},
+        "carbs": {"type": "integer", "minimum": 0, "maximum": 1000},
+        "usefulness": {"type": "number", "minimum": 0, "maximum": 10},
+    },
+    "required": [
+        "food_name",
+        "portion_label",
+        "grams",
+        "calories",
+        "protein",
+        "fat",
+        "carbs",
+        "usefulness",
+    ],
+}
+
+
+def call_openai_json(
+    system_prompt: str,
+    user_payload: Optional[dict],
+    schema_name: str,
+    schema: dict,
+    user_content: Optional[list[dict]] = None,
+) -> dict:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
+
+    if user_content is None:
+        user_content = [
+            {
+                "type": "input_text",
+                "text": json.dumps(user_payload or {}, ensure_ascii=False),
+            }
+        ]
 
     payload = {
         "model": os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
@@ -613,7 +653,7 @@ def call_openai_json(system_prompt: str, user_payload: dict, schema_name: str, s
             },
             {
                 "role": "user",
-                "content": json.dumps(user_payload, ensure_ascii=False),
+                "content": user_content,
             },
         ],
         "text": {
@@ -649,30 +689,40 @@ def analyze_food_with_openai(description: str) -> dict:
         ),
         user_payload={"description": description},
         schema_name="food_analysis",
-        schema={
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "food_name": {"type": "string"},
-                "portion_label": {"type": "string"},
-                "grams": {"type": "integer", "minimum": 1, "maximum": 5000},
-                "calories": {"type": "integer", "minimum": 1, "maximum": 10000},
-                "protein": {"type": "integer", "minimum": 0, "maximum": 1000},
-                "fat": {"type": "integer", "minimum": 0, "maximum": 1000},
-                "carbs": {"type": "integer", "minimum": 0, "maximum": 1000},
-                "usefulness": {"type": "number", "minimum": 0, "maximum": 10},
+        schema=FOOD_ANALYSIS_SCHEMA,
+    )
+
+
+def analyze_food_photo_with_openai(image_data_url: str, note: str = "") -> dict:
+    if not re.match(r"^data:image/(jpeg|jpg|png|webp);base64,[A-Za-z0-9+/=\s]+$", image_data_url):
+        raise ValueError("image_data_url is invalid")
+    if len(image_data_url) > 2_800_000:
+        raise ValueError("image is too large")
+
+    note_text = note.strip()[:300] or "Нет дополнительного описания."
+    return call_openai_json(
+        system_prompt=(
+            "Ты нутрициологический vision-парсер для дневника калорий. "
+            "По фото блюда оцени наиболее вероятное блюдо, примерный вес порции, калории и БЖУ. "
+            "Если вес по фото неочевиден, сделай осторожную реалистичную оценку и отрази порцию в portion_label. "
+            "Верни только JSON без markdown."
+        ),
+        user_payload=None,
+        schema_name="food_analysis",
+        schema=FOOD_ANALYSIS_SCHEMA,
+        user_content=[
+            {
+                "type": "input_text",
+                "text": (
+                    "Проанализируй фото еды для дневника калорий. "
+                    f"Дополнительное описание пользователя: {note_text}"
+                ),
             },
-            "required": [
-                "food_name",
-                "portion_label",
-                "grams",
-                "calories",
-                "protein",
-                "fat",
-                "carbs",
-                "usefulness",
-            ],
-        },
+            {
+                "type": "input_image",
+                "image_url": image_data_url,
+            },
+        ],
     )
 
 
@@ -844,18 +894,24 @@ class WebAppApiHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self) -> None:
-        if self.path not in {"/api/analyze-food", "/api/create-plan"}:
+        if self.path not in {"/api/analyze-food", "/api/analyze-photo", "/api/create-plan"}:
             self.send_json({"error": "Not found"}, 404)
             return
 
         try:
             length = int(self.headers.get("Content-Length", "0"))
+            if length > 3_200_000:
+                raise ValueError("payload is too large")
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
             if self.path == "/api/analyze-food":
                 description = str(payload.get("description", "")).strip()
                 if len(description) < 3:
                     raise ValueError("description is too short")
                 result = analyze_food_with_openai(description[:600])
+            elif self.path == "/api/analyze-photo":
+                image_data_url = str(payload.get("image_data_url", "")).strip()
+                note = str(payload.get("note", "")).strip()
+                result = analyze_food_photo_with_openai(image_data_url, note)
             else:
                 profile = payload.get("profile")
                 if not isinstance(profile, dict):
