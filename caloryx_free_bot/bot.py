@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -9,7 +10,7 @@ import urllib.error
 import urllib.request
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
@@ -675,8 +676,99 @@ def analyze_food_with_openai(description: str) -> dict:
     )
 
 
+def diet_macro_grams(calories: int, diet: str) -> tuple[int, int, int]:
+    diet_splits = {
+        "none": (0.29, 0.28, 0.43),
+        "vegetarian": (0.25, 0.27, 0.48),
+        "vegan": (0.23, 0.25, 0.52),
+        "paleo": (0.30, 0.35, 0.35),
+    }
+    if diet == "keto":
+        protein = round(calories * 0.30 / 4)
+        carbs = min(50, round(calories * 0.08 / 4))
+        fat = round(max(calories - protein * 4 - carbs * 4, calories * 0.55) / 9)
+        return protein, fat, carbs
+
+    protein_split, fat_split, carbs_split = diet_splits.get(diet, diet_splits["none"])
+    return (
+        round(calories * protein_split / 4),
+        round(calories * fat_split / 9),
+        round(calories * carbs_split / 4),
+    )
+
+
+def diet_rate_modifier(diet: str, goal: str) -> float:
+    if diet == "keto":
+        return 0.90 if goal != "maintain" else 1.0
+    if diet == "vegan":
+        return 0.88 if goal == "gain" else 0.95
+    if diet == "vegetarian":
+        return 0.92 if goal == "gain" else 0.97
+    if diet == "paleo":
+        return 1.02 if goal != "maintain" else 1.0
+    return 1.0
+
+
+def build_chart_points(profile: dict, weekly_rate: float) -> list[dict]:
+    start = float(profile.get("weight") or 80)
+    goal = str(profile.get("goal") or "loss")
+    target = float(profile.get("targetWeight") or start)
+    if goal == "gain" and target <= start:
+        target = start + 5
+    elif goal == "loss" and target >= start:
+        target = max(35, start - 5)
+    elif goal == "maintain":
+        target = start
+
+    diff = abs(target - start)
+    weeks = 12 if goal == "maintain" else max(4, min(104, round(diff / max(weekly_rate, 0.1))))
+    points = []
+    for ratio in (0, 0.25, 0.5, 0.75, 1):
+        if goal == "loss":
+            eased = 1 - (1 - ratio) ** 1.35
+        elif goal == "gain":
+            eased = ratio ** 1.2
+        else:
+            eased = ratio
+        wave = 0.35 * math.sin(ratio * math.pi * 2) if goal == "maintain" else 0
+        points.append({
+            "week": round(weeks * ratio),
+            "weight": round(start + (target - start) * eased + wave, 1),
+        })
+    return points
+
+
+def apply_diet_plan_rules(plan: dict, profile: dict) -> dict:
+    diet = str(profile.get("diet") or "none")
+    goal = str(profile.get("goal") or "loss")
+    calories = int(plan.get("calories") or 2000)
+    protein, fat, carbs = diet_macro_grams(calories, diet)
+    base_rate = float(profile.get("speed") or plan.get("weekly_rate") or 0.4)
+    weekly_rate = round(max(0.05, min(1.0, base_rate * diet_rate_modifier(diet, goal))), 2)
+
+    plan["protein"] = protein
+    plan["fat"] = fat
+    plan["carbs"] = carbs
+    plan["weekly_rate"] = weekly_rate
+    plan["chart_points"] = build_chart_points(profile, weekly_rate)
+    last_week = plan["chart_points"][-1]["week"]
+    plan["target_date"] = (date.today() + timedelta(weeks=last_week)).isoformat()
+
+    diet_labels = {
+        "vegetarian": "вегетарианский режим",
+        "vegan": "веганский режим",
+        "keto": "кето-режим",
+        "paleo": "палео-режим",
+        "none": "обычный режим",
+    }
+    label = diet_labels.get(diet, "выбранный режим")
+    if diet != "none":
+        plan["summary"] = f"{plan.get('summary', '').strip()} План адаптирован под {label}: БЖУ и темп рассчитаны с учетом ограничений этой диеты.".strip()
+    return plan
+
+
 def create_plan_with_openai(profile: dict) -> dict:
-    return call_openai_json(
+    plan = call_openai_json(
         system_prompt=(
             "Ты осторожный нутрициологический помощник. На основе анкеты пользователя "
             "составь реалистичный дневной режим питания для приложения подсчета калорий. "
@@ -737,6 +829,7 @@ def create_plan_with_openai(profile: dict) -> dict:
             ],
         },
     )
+    return apply_diet_plan_rules(plan, profile)
 
 
 class WebAppApiHandler(BaseHTTPRequestHandler):
