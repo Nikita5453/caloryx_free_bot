@@ -84,17 +84,10 @@ FOOD_DB = {
 }
 
 def build_main_keyboard(web_app_url: Optional[str] = None) -> ReplyKeyboardMarkup:
-    rows = []
     if web_app_url and web_app_url.startswith("https://"):
-        rows.append([KeyboardButton("📸 Сканировать", web_app=WebAppInfo(url=web_app_url))])
+        rows = [[KeyboardButton("📸 Сканировать", web_app=WebAppInfo(url=web_app_url))]]
     else:
-        rows.append(["📸 Сканировать"])
-    rows.extend(
-        [
-            ["Добавить еду", "Сегодня"],
-            ["Профиль", "История"],
-        ]
-    )
+        rows = [["📸 Сканировать"]]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
