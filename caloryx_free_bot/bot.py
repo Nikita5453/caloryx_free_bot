@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import math
@@ -14,6 +16,7 @@ from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
+from urllib.parse import parse_qsl
 
 from dotenv import load_dotenv
 from telegram import (
@@ -149,6 +152,15 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS webapp_states (
+                user_id INTEGER PRIMARY KEY,
+                state_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
         conn.commit()
 
 
@@ -168,6 +180,72 @@ def db_all(query: str, params: tuple = ()) -> list[sqlite3.Row]:
     with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.row_factory = sqlite3.Row
         return conn.execute(query, params).fetchall()
+
+
+def telegram_webapp_user_id(init_data: str) -> int:
+    token = os.getenv("BOT_TOKEN", "")
+    if not token or not init_data:
+        raise PermissionError("Telegram authorization is required")
+
+    data = dict(parse_qsl(init_data, keep_blank_values=True))
+    received_hash = data.pop("hash", "")
+    if not received_hash or "user" not in data:
+        raise PermissionError("Invalid Telegram authorization")
+
+    data_check_string = "\n".join(f"{key}={value}" for key, value in sorted(data.items()))
+    secret_key = hmac.new(b"WebAppData", token.encode("utf-8"), hashlib.sha256).digest()
+    expected_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected_hash, received_hash):
+        raise PermissionError("Invalid Telegram authorization")
+
+    try:
+        user_id = int(json.loads(data["user"])["id"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise PermissionError("Invalid Telegram user") from exc
+    if user_id <= 0:
+        raise PermissionError("Invalid Telegram user")
+    return user_id
+
+
+def load_webapp_state(user_id: int) -> Optional[dict]:
+    row = db_one("SELECT state_json, updated_at FROM webapp_states WHERE user_id = ?", (user_id,))
+    if not row:
+        return None
+    try:
+        state = json.loads(row["state_json"])
+    except json.JSONDecodeError:
+        logging.warning("Invalid stored Mini App state for user %s", user_id)
+        return None
+    if not isinstance(state, dict):
+        return None
+    return {"state": state, "updated_at": row["updated_at"]}
+
+
+def save_webapp_state(user_id: int, state: object) -> dict:
+    if not isinstance(state, dict):
+        raise ValueError("state is required")
+    profile = state.get("profile")
+    meals_by_date = state.get("mealsByDate")
+    if profile is not None and not isinstance(profile, dict):
+        raise ValueError("invalid profile")
+    if not isinstance(meals_by_date, dict):
+        raise ValueError("invalid meals")
+
+    state_json = json.dumps(state, ensure_ascii=False, separators=(",", ":"))
+    if len(state_json.encode("utf-8")) > 900_000:
+        raise ValueError("state is too large")
+    updated_at = datetime.now().isoformat(timespec="seconds")
+    db_execute(
+        """
+        INSERT INTO webapp_states (user_id, state_json, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            state_json = excluded.state_json,
+            updated_at = excluded.updated_at
+        """,
+        (user_id, state_json, updated_at),
+    )
+    return {"updated_at": updated_at}
 
 
 def calc_target(gender: str, age: int, height: int, weight: float, activity: str, goal: str) -> int:
@@ -862,7 +940,7 @@ class WebAppApiHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self) -> None:
-        if self.path not in {"/api/analyze-food", "/api/analyze-photo", "/api/create-plan"}:
+        if self.path not in {"/api/analyze-food", "/api/analyze-photo", "/api/create-plan", "/api/sync-state"}:
             self.send_json({"error": "Not found"}, 404)
             return
 
@@ -880,16 +958,27 @@ class WebAppApiHandler(BaseHTTPRequestHandler):
                 image_data_url = str(payload.get("image_data_url", "")).strip()
                 note = str(payload.get("note", "")).strip()
                 result = analyze_food_photo_with_openai(image_data_url, note)
-            else:
+            elif self.path == "/api/create-plan":
                 profile = payload.get("profile")
                 if not isinstance(profile, dict):
                     raise ValueError("profile is required")
                 result = create_plan_with_openai(profile)
+            else:
+                user_id = telegram_webapp_user_id(str(payload.get("init_data", "")))
+                action = str(payload.get("action", "load"))
+                if action == "load":
+                    result = load_webapp_state(user_id) or {"state": None}
+                elif action == "save":
+                    result = save_webapp_state(user_id, payload.get("state"))
+                else:
+                    raise ValueError("unknown sync action")
             self.send_json(result)
+        except PermissionError as exc:
+            self.send_json({"error": str(exc)}, 401)
         except RuntimeError as exc:
             self.send_json({"error": str(exc)}, 500)
         except (ValueError, json.JSONDecodeError):
-            self.send_json({"error": "Некорректное описание блюда"}, 400)
+            self.send_json({"error": "Некорректные данные"}, 400)
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="ignore")
             logging.exception("OpenAI HTTP error: %s", body)
