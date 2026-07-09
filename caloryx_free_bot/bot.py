@@ -681,7 +681,9 @@ def create_plan_with_openai(profile: dict) -> dict:
             "Ты осторожный нутрициологический помощник. На основе анкеты пользователя "
             "составь реалистичный дневной режим питания для приложения подсчета калорий. "
             "Не давай медицинских обещаний. Для опасных значений выбирай безопасный умеренный режим. "
-            "Верни только JSON. Калории не ниже 1200 для большинства взрослых, без экстремальных дефицитов."
+            "Верни только JSON. Калории не ниже 1200 для большинства взрослых, без экстремальных дефицитов. "
+            "chart_points должны быть реалистичной траекторией веса: для похудения убывающей, "
+            "для набора возрастающей, для поддержания почти ровной. Используй 5 точек от недели 0 до цели."
         ),
         user_payload={"profile": profile},
         schema_name="personal_nutrition_plan",
@@ -703,6 +705,20 @@ def create_plan_with_openai(profile: dict) -> dict:
                     "maxItems": 5,
                     "items": {"type": "string"},
                 },
+                "chart_points": {
+                    "type": "array",
+                    "minItems": 5,
+                    "maxItems": 5,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "week": {"type": "integer", "minimum": 0, "maximum": 104},
+                            "weight": {"type": "number", "minimum": 25, "maximum": 350},
+                        },
+                        "required": ["week", "weight"],
+                    },
+                },
             },
             "required": [
                 "calories",
@@ -714,6 +730,7 @@ def create_plan_with_openai(profile: dict) -> dict:
                 "weekly_rate",
                 "summary",
                 "daily_advice",
+                "chart_points",
             ],
         },
     )
