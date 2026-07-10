@@ -669,6 +669,23 @@ FOOD_ANALYSIS_SCHEMA = {
 }
 
 
+PHOTO_FOOD_ANALYSIS_SCHEMA = {
+    **FOOD_ANALYSIS_SCHEMA,
+    "properties": {
+        **FOOD_ANALYSIS_SCHEMA["properties"],
+        "is_food": {"type": "boolean"},
+    },
+    "required": [
+        *FOOD_ANALYSIS_SCHEMA["required"],
+        "is_food",
+    ],
+}
+
+
+class UserFacingApiError(Exception):
+    pass
+
+
 def call_openai_json(
     system_prompt: str,
     user_payload: Optional[dict],
@@ -745,8 +762,11 @@ def analyze_food_photo_with_openai(image_data_url: str, note: str = "") -> dict:
         raise ValueError("image is too large")
 
     note_text = note.strip()[:300] or "Нет дополнительного описания."
-    return call_openai_json(
+    result = call_openai_json(
         system_prompt=(
+            "First decide if the image contains edible food or a drink. "
+            "If it does not, return is_food=false and fill the other required fields with safe placeholder values. "
+            "If it does, return is_food=true and analyze only the visible food/drink. "
             "Ты нутрициологический vision-парсер для дневника калорий. "
             "По фото блюда оцени наиболее вероятное блюдо, примерный вес порции, калории и БЖУ. "
             "Если вес по фото неочевиден, сделай осторожную реалистичную оценку и отрази порцию в portion_label. "
@@ -755,7 +775,7 @@ def analyze_food_photo_with_openai(image_data_url: str, note: str = "") -> dict:
         ),
         user_payload=None,
         schema_name="food_analysis",
-        schema=FOOD_ANALYSIS_SCHEMA,
+        schema=PHOTO_FOOD_ANALYSIS_SCHEMA,
         user_content=[
             {
                 "type": "input_text",
@@ -770,6 +790,10 @@ def analyze_food_photo_with_openai(image_data_url: str, note: str = "") -> dict:
             },
         ],
     )
+    if result.get("is_food") is not True:
+        raise UserFacingApiError("Нужно отсканировать только еду.")
+    result.pop("is_food", None)
+    return result
 
 
 def generate_food_image_with_openai(description: str) -> dict:
@@ -1016,6 +1040,8 @@ class WebAppApiHandler(BaseHTTPRequestHandler):
             self.send_json(result)
         except PermissionError as exc:
             self.send_json({"error": str(exc)}, 401)
+        except UserFacingApiError as exc:
+            self.send_json({"error": str(exc)}, 400)
         except RuntimeError as exc:
             self.send_json({"error": str(exc)}, 500)
         except (ValueError, json.JSONDecodeError):
